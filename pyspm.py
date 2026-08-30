@@ -2,6 +2,8 @@ import socket
 import pickle
 import os
 import io
+import contextlib
+
 
 try:
 	from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
@@ -26,6 +28,20 @@ from .pyspm_exceptions import *
 # ==============================
 #            UTIL
 # ==============================
+
+def bytes_to_bools(data):
+	return tuple(
+		(byte >> bit) & 1 == 1
+		for byte in data
+		for bit in range(7, -1, -1)
+	)
+
+def bools_to_bytes(data):
+	return bytes(
+		sum(bit << (7 - i) for i, bit in enumerate(data[offset:offset + 8]))
+		for offset in range(0, len(data), 8)
+	)
+
 
 class FuckedUnpicklerButtplug(NamedPrint):
 	def __init__(self, *args, **kwargs):
@@ -62,17 +78,19 @@ class PSPMShared(NamedPrint):
 	# The OTHER side has this many seconds
 	# to read the payload sent by THIS side
 	# before its connection is terminated
-	MSG_SEND_TIMEOUT = 69.000
+	DEFAULT_CHUNK_SEND_TIMEOUT = 69.000
+	DEFAULT_MSG_SEND_TIMEOUT =   DEFAULT_CHUNK_SEND_TIMEOUT * 2
 
 	# The OTHER side has this many seconds
 	# to finish sending the payload
 	# before its connection is force terminated
-	MSG_RECV_TIMEOUT = 67.000
+	DEFAULT_CHUNK_RECV_TIMEOUT = 67.000
+	DEFAULT_MSG_RECV_TIMEOUT =   DEFAULT_CHUNK_RECV_TIMEOUT * 2
 
 	# The OTHER side has this many seconds
 	# to read the ping sent by THIS side
 	# before its connection is force terminated
-	PING_TIMEOUT = 69.000
+	DEFAULT_PING_TIMEOUT = 69.000
 
 	# Auth is just a regular message, which consists of random bytes.
 	AUTH_MSG_LEN = 512
@@ -80,6 +98,15 @@ class PSPMShared(NamedPrint):
 	# Thou who connects has this many seconds
 	# to send the first message before their connection is force terminated.
 	AUTH_TIMEOUT_S = 4.000
+
+	# Flags:
+	# 0 = Is ping
+	# 1 = Is last
+	# 2 = -
+	# 3 = -
+	# 5 = -
+	# 6 = -
+	# 7 = -
 
 	def __init__(self, skt_raw, key, alt_timer=None):
 		# The raw socket object
@@ -105,19 +132,7 @@ class PSPMShared(NamedPrint):
 		)
 
 
-	def send_ping(self):
-		try:
-			with self.skt_timeout(self.PING_TIMEOUT):
-				# Payload len of 0 = ping
-				self.skt_raw.sendall(
-					(0).to_bytes(4, 'little')
-				)
-
-			return (True, None)
-		except Exception as e:
-			return (False, e)
-
-	def send_msg(self, msg_data):
+	def _send_msg(self, msg_data, msg_type=0):
 		try:
 			nonce = os.urandom(12)
 			main_payload = self.cipher.encrypt(
@@ -142,7 +157,7 @@ class PSPMShared(NamedPrint):
 		except Exception as e:
 			return (False, e)
 
-	def read_msg(self, timeout=None):
+	def _read_msg(self, timeout=None):
 		try:
 			while True:
 				payload_len = int.from_bytes(
@@ -183,12 +198,182 @@ class PSPMShared(NamedPrint):
 
 
 
+	def send_ping(self, timeout=None):
+		try:
+			with self.skt_timeout(timeout or self.DEFAULT_PING_TIMEOUT):
+				self.skt_raw.sendall(
+					bools_to_bytes((True,))
+				)
+
+			return (True, None)
+		except Exception as e:
+			return (False, e)
+
+	def send_chunk(self, msg_data, is_last=False, timeout=None):
+		nonce = os.urandom(12)
+		main_payload = self.cipher.encrypt(
+			nonce,
+			pickle.dumps(msg_data),
+			None
+		)
+
+		with self.skt_timeout(timeout or self.DEFAULT_CHUNK_SEND_TIMEOUT):
+			# Flags
+			self.skt_raw.sendall(
+				bools_to_bytes((
+					# Not ping
+					False,
+					# Whether it's the last message in the sequence
+					is_last,
+				))
+			)
+
+			# The size of the pickled shit
+			self.skt_raw.sendall(
+				len(main_payload).to_bytes(4, 'little')
+			)
+
+			# Some mandatory cryptographic shit
+			self.skt_raw.sendall(nonce)
+
+			# The pickled shit itself
+			self.skt_raw.sendall(main_payload)
+
+	@contextlib.contextmanager
+	def send_stream(self, timeout=None):
+		def send(chunk_bytes):
+			self.send_chunk(
+				chunk_bytes,
+				is_last=False,
+				timeout=timeout
+			)
+
+		yield send
+
+		self.send_chunk(b'', True, timeout=timeout)
+
+	def send_buf(self, src_buf, timeout=None, chunk_size=(1024**2)*8):
+		with self.send_stream(timeout=timeout) as send_fnc:
+			while (chunk := src_buf.read(chunk_size)):
+				send_fnc(chunk)
+
+	def send_msg(self, msg_data, timeout=None):
+		self.send_chunk(
+			msg_data,
+			is_last=True,
+			timeout=timeout or self.DEFAULT_MSG_SEND_TIMEOUT,
+		)
+
+
+
+	def read_header(self):
+		while True:
+			# Read flags
+			msg_flags = bytes_to_bools(
+				aligned_recv(self.skt_raw, 1)
+			)
+
+			is_ping, is_last, *_ = msg_flags
+
+			if is_ping:
+				continue
+			else:
+				break
+
+		# Read the size of the payload
+		payload_len = int.from_bytes(
+			aligned_recv(self.skt_raw, 4),
+			'little'
+		)
+
+		return (
+			msg_flags[1:],
+			payload_len
+		)
+
+	def read_body(self, payload_len, timeout=None):
+		try:
+			with self.skt_timeout(timeout or self.DEFAULT_CHUNK_RECV_TIMEOUT):
+				pickle_bytes = self.cipher.decrypt(
+					# nonce
+					aligned_recv(self.skt_raw, 12),
+
+					# pickle bytes
+					aligned_recv(self.skt_raw, payload_len),
+
+					# Whatever
+					None
+				)
+
+			return (
+				# Eval pickle bytes into python object and return it
+				FuckedUnpickler(io.BytesIO(pickle_bytes)).load()
+				if self.USE_FUCKED_UNPICKLER else
+				pickle.loads(pickle_bytes)
+			)
+
+		except crypto_exceptions.InvalidTag as e:
+			raise CipherFailure(e)
+
+	def read_chunk(self, timeout=None):
+		msg_flags, payload_len = self.read_header()
+		return (
+			msg_flags,
+			self.read_body(payload_len, timeout=timeout)
+		)
+
+	def read_stream(self, timeout=None):
+		while True:
+			msg_flags, msg_bytes = self.read_chunk(timeout=timeout)
+			is_last, *_ = msg_flags
+
+			yield msg_bytes
+
+			if is_last:
+				break
+
+	def read_into(self, tgt_buf, timeout=None):
+		for chunk in self.read_stream():
+			tgt_buf.write(chunk)
+
+	def read_msg(self, timeout=None):
+		msg_flags, payload_len = self.read_header()
+		is_last, *_ = msg_flags
+
+		if is_last:
+			return self.read_body(
+				payload_len,
+				timeout=timeout or self.DEFAULT_MSG_RECV_TIMEOUT
+			)
+
+		with self.skt_timeout(timeout or self.DEFAULT_MSG_RECV_TIMEOUT):
+			buf = io.BytesIO(
+				self.read_body(
+					payload_len,
+					timeout=1337_69
+				)
+			)
+
+			while True:
+				msg_flags, msg_bytes = self.read_chunk(timeout=1337_69)
+				is_last, *_ = msg_flags
+
+				buf.write(msg_bytes)
+
+				if is_last:
+					break
+
+		return buf.getvalue()
+
 
 class PSPMListener(NamedPrint):
 	def __init__(self, listen_skt, key, alt_timer=None):
 		self.listen_skt = listen_skt
 		self.key = key
 		self.alt_timer = alt_timer
+
+	def terminate(self):
+		terminate_skt(self.listen_skt)
 
 	def accept(self):
 		# INCOMING socket connection from OTHER side
@@ -205,26 +390,21 @@ class PSPMListener(NamedPrint):
 		# The first message in the session is just a bunch of random bytes
 		# to see whether decryption errors or not.
 		# (acts as bootleg auth)
-		read_ok, read_data = pspm_con.read_msg(PSPMShared.AUTH_TIMEOUT_S)
-
-		# Error should be present in this case
-		if not read_ok:
+		try:
+			msg_data = pspm_con.read_msg(PSPMShared.AUTH_TIMEOUT_S)
+		except CipherFailure as e:
 			terminate_skt(skt_con)
-
-			if isinstance(read_data, crypto_exceptions.InvalidTag):
-				raise InvalidKey('Decryption failed')
-			elif isinstance(read_data, Exception):
-				raise read_data
-			else:
-				raise AuthFail(f'Generic failure: {read_ok}')
+			raise InvalidKey('Decryption failed')
+		except Exception as e:
+			terminate_skt(skt_con)
+			raise AuthFail(e)
 
 		# Auth message has to be of specific length
-		if len(read_data) != PSPMShared.AUTH_MSG_LEN:
+		if len(msg_data) != PSPMShared.AUTH_MSG_LEN:
 			terminate_skt(skt_con)
-
 			raise WrongAuthMessageLength(
 				f'Wrong auth message length: Need {PSPMShared.AUTH_MSG_LEN}, '
-				f'but got {len(read_data)}'
+				f'but got {len(msg_data)}'
 			)
 
 		return pspm_con
@@ -291,7 +471,7 @@ class PySecurePickleMessaging(NamedPrint):
 		# The first message in the session is just a bunch of random bytes
 		# to see whether decryption errors or not.
 		# (acts as bootleg auth)
-		auth_ok, auth_error = pspm_con.send_msg(
+		pspm_con.send_msg(
 			os.urandom(PSPMShared.AUTH_MSG_LEN)
 		)
 
@@ -299,7 +479,7 @@ class PySecurePickleMessaging(NamedPrint):
 		ping_ok, ping_error = pspm_con.send_ping()
 
 		if not ping_ok:
-			raise AuthFail('Post-auth ping failed')
+			raise AuthFail(ping_error)
 
 		return pspm_con
 

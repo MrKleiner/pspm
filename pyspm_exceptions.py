@@ -11,5 +11,6 @@ class WrongAuthMessageLength(AuthFail):
 	pass
 
 
-
+class CipherFailure(Exception):
+	pass
 
