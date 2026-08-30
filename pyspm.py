@@ -12,6 +12,7 @@ except ImportError as e:
 	ChaCha20Poly1305 = None
 	raise e
 
+
 from .jag.jag_util import (
 	print_exception_framed,
 	aligned_recv,
@@ -22,6 +23,8 @@ from .jag.jag_util import (
 )
 
 from .pyspm_exceptions import *
+
+
 
 
 
@@ -43,6 +46,7 @@ def bools_to_bytes(data):
 	)
 
 
+
 class FuckedUnpicklerButtplug(NamedPrint):
 	def __init__(self, *args, **kwargs):
 		self.__dict__.update(kwargs)
@@ -55,12 +59,17 @@ class FuckedUnpicklerButtplug(NamedPrint):
 
 
 class FuckedUnpickler(pickle.Unpickler, NamedPrint):
+	PRINT_WARNINGS = False
 	def find_class(self, module, name):
 		try:
 			return super().find_class(module, name)
 		except (ModuleNotFoundError, AttributeError):
-			self.nprint('WARNING: MISSING SHIT:', module, name)
+			if self.PRINT_WARNINGS:
+				self.nprint('WARNING: MISSING SHIT:', module, name)
 			return FuckedUnpicklerButtplug
+
+
+
 
 
 
@@ -359,7 +368,6 @@ class PSPMConnection(PSPMShared):
 
 	def __exit__(self, e_type, e_val, e_trace):
 		self.terminate()
-
 
 
 
