@@ -132,71 +132,6 @@ class PSPMShared(NamedPrint):
 		)
 
 
-	def _send_msg(self, msg_data, msg_type=0):
-		try:
-			nonce = os.urandom(12)
-			main_payload = self.cipher.encrypt(
-				nonce,
-				pickle.dumps(msg_data),
-				None
-			)
-
-			with self.skt_timeout(self.MSG_SEND_TIMEOUT):
-				# The size of the pickled shit
-				self.skt_raw.sendall(
-					len(main_payload).to_bytes(4, 'little')
-				)
-
-				# Some mandatory cryptographic shit
-				self.skt_raw.sendall(nonce)
-
-				# The pickled shit itself
-				self.skt_raw.sendall(main_payload)
-
-			return (True, None)
-		except Exception as e:
-			return (False, e)
-
-	def _read_msg(self, timeout=None):
-		try:
-			while True:
-				payload_len = int.from_bytes(
-					aligned_recv(self.skt_raw, 4),
-					'little'
-				)
-
-				# Tis a ping
-				if payload_len <= 0:
-					continue
-				else:
-					break
-
-			# Read shit from the socket
-			with self.skt_timeout(timeout or self.MSG_RECV_TIMEOUT):
-				pickle_bytes = self.cipher.decrypt(
-					# nonce
-					aligned_recv(self.skt_raw, 12),
-
-					# pickle bytes
-					aligned_recv(self.skt_raw, payload_len),
-
-					# Whatever
-					None
-				)
-
-			return (
-				True,
-
-				# Eval shit from the socket and return it
-				FuckedUnpickler(io.BytesIO(pickle_bytes)).load()
-				if self.USE_FUCKED_UNPICKLER else
-				pickle.loads(pickle_bytes)
-			)
-
-		except Exception as e:
-			return (False, e)
-
-
 
 	def send_ping(self, timeout=None):
 		try:
@@ -366,11 +301,18 @@ class PSPMShared(NamedPrint):
 		return buf.getvalue()
 
 
+
 class PSPMListener(NamedPrint):
 	def __init__(self, listen_skt, key, alt_timer=None):
 		self.listen_skt = listen_skt
 		self.key = key
 		self.alt_timer = alt_timer
+
+	def __enter__(self):
+		return self
+
+	def __exit__(self, e_type, e_val, e_trace):
+		self.terminate()
 
 	def terminate(self):
 		terminate_skt(self.listen_skt)
@@ -412,7 +354,12 @@ class PSPMListener(NamedPrint):
 
 
 class PSPMConnection(PSPMShared):
-	pass
+	def __enter__(self):
+		return self
+
+	def __exit__(self, e_type, e_val, e_trace):
+		self.terminate()
+
 
 
 
