@@ -2,7 +2,6 @@ import socket
 import pickle
 import os
 import io
-import argparse
 
 try:
 	from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
@@ -20,6 +19,7 @@ from .jag.jag_util import (
 	terminate_skt,
 )
 
+from .pyspm_exceptions import *
 
 
 
@@ -46,17 +46,6 @@ class FuckedUnpickler(pickle.Unpickler, NamedPrint):
 			self.nprint('WARNING: MISSING SHIT:', module, name)
 			return FuckedUnpicklerButtplug
 
-
-class AuthFail(Exception):
-	pass
-
-
-class InvalidKey(AuthFail):
-	pass
-
-
-class WrongAuthMessageLength(AuthFail):
-	pass
 
 
 
@@ -110,6 +99,11 @@ class PSPMShared(NamedPrint):
 			timer=self.alt_timer,
 		)
 
+	def terminate(self):
+		terminate_skt(
+			self.skt_raw
+		)
+
 
 	def send_ping(self):
 		try:
@@ -121,7 +115,6 @@ class PSPMShared(NamedPrint):
 
 			return (True, None)
 		except Exception as e:
-			print_exception_framed(e)
 			return (False, e)
 
 	def send_msg(self, msg_data):
@@ -146,9 +139,7 @@ class PSPMShared(NamedPrint):
 				self.skt_raw.sendall(main_payload)
 
 			return (True, None)
-
 		except Exception as e:
-			print_exception_framed(e)
 			return (False, e)
 
 	def read_msg(self, timeout=None):
@@ -189,6 +180,7 @@ class PSPMShared(NamedPrint):
 
 		except Exception as e:
 			return (False, e)
+
 
 
 
