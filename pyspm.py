@@ -73,7 +73,6 @@ class FuckedUnpickler(pickle.Unpickler, NamedPrint):
 
 
 
-
 # ==============================
 #            STUFF
 # ==============================
@@ -109,13 +108,13 @@ class PSPMShared(NamedPrint):
 	AUTH_TIMEOUT_S = 4.000
 
 	# Flags:
-	# 0 = Is ping
-	# 1 = Is last
-	# 2 = -
-	# 3 = -
-	# 5 = -
-	# 6 = -
-	# 7 = -
+	# 0 - = Is ping
+	# 1 0 = Is last
+	# 2 1 = Is pickled
+	# 3 2 = -
+	# 5 3 = -
+	# 6 4 = -
+	# 7 5 = -
 
 	def __init__(self, skt_raw, key, alt_timer=None):
 		# The raw socket object
@@ -126,6 +125,8 @@ class PSPMShared(NamedPrint):
 		self.alt_timer = alt_timer
 		# Encryption object TM
 		self.cipher = ChaCha20Poly1305(self.key)
+		# Whether a stream is under way
+		self.streaming = False
 
 
 	def skt_timeout(self, timeout):
@@ -153,11 +154,12 @@ class PSPMShared(NamedPrint):
 		except Exception as e:
 			return (False, e)
 
-	def send_chunk(self, msg_data, is_last=False, timeout=None):
+	def send_chunk(self, msg_data, is_last=False, timeout=None,):
+		do_pickle = not isinstance(msg_data, bytes)
 		nonce = os.urandom(12)
 		main_payload = self.cipher.encrypt(
 			nonce,
-			pickle.dumps(msg_data),
+			pickle.dumps(msg_data) if do_pickle else msg_data,
 			None
 		)
 
@@ -169,6 +171,8 @@ class PSPMShared(NamedPrint):
 					False,
 					# Whether it's the last message in the sequence
 					is_last,
+					# Whether the payload is pickled
+					do_pickle,
 				))
 			)
 
@@ -185,16 +189,20 @@ class PSPMShared(NamedPrint):
 
 	@contextlib.contextmanager
 	def send_stream(self, timeout=None):
+		self.streaming = True
+
 		def send(chunk_bytes):
 			self.send_chunk(
 				chunk_bytes,
 				is_last=False,
-				timeout=timeout
+				timeout=timeout,
 			)
 
-		yield send
-
-		self.send_chunk(b'', True, timeout=timeout)
+		try:
+			yield send
+		finally:
+			self.streaming = False
+			self.send_chunk(b'', is_last=True, timeout=timeout)
 
 	def send_buf(self, src_buf, timeout=None, chunk_size=(1024**2)*8):
 		with self.send_stream(timeout=timeout) as send_fnc:
@@ -202,6 +210,9 @@ class PSPMShared(NamedPrint):
 				send_fnc(chunk)
 
 	def send_msg(self, msg_data, timeout=None):
+		if self.streaming:
+			raise ValueError('Finish streaming first')
+
 		self.send_chunk(
 			msg_data,
 			is_last=True,
@@ -235,10 +246,10 @@ class PSPMShared(NamedPrint):
 			payload_len
 		)
 
-	def read_body(self, payload_len, timeout=None):
+	def read_body(self, payload_len, is_pickled, timeout=None):
 		try:
 			with self.skt_timeout(timeout or self.DEFAULT_CHUNK_RECV_TIMEOUT):
-				pickle_bytes = self.cipher.decrypt(
+				payload_bytes = self.cipher.decrypt(
 					# nonce
 					aligned_recv(self.skt_raw, 12),
 
@@ -249,21 +260,28 @@ class PSPMShared(NamedPrint):
 					None
 				)
 
-			return (
-				# Eval pickle bytes into python object and return it
-				FuckedUnpickler(io.BytesIO(pickle_bytes)).load()
-				if self.USE_FUCKED_UNPICKLER else
-				pickle.loads(pickle_bytes)
-			)
+			if is_pickled:
+				self.nprint('Unpickling')
+				return (
+					# Eval pickle bytes into python object and return it
+					FuckedUnpickler(io.BytesIO(payload_bytes)).load()
+					if self.USE_FUCKED_UNPICKLER else
+					pickle.loads(payload_bytes)
+				)
+			else:
+				self.nprint('NOT unpickling')
+				return payload_bytes
 
 		except crypto_exceptions.InvalidTag as e:
 			raise CipherFailure(e)
 
 	def read_chunk(self, timeout=None):
 		msg_flags, payload_len = self.read_header()
+		_, is_pickled, *_ = msg_flags
+
 		return (
 			msg_flags,
-			self.read_body(payload_len, timeout=timeout)
+			self.read_body(payload_len, is_pickled, timeout=timeout)
 		)
 
 	def read_stream(self, timeout=None):
@@ -282,11 +300,12 @@ class PSPMShared(NamedPrint):
 
 	def read_msg(self, timeout=None):
 		msg_flags, payload_len = self.read_header()
-		is_last, *_ = msg_flags
+		is_last, is_pickled, *_ = msg_flags
 
 		if is_last:
 			return self.read_body(
 				payload_len,
+				is_pickled,
 				timeout=timeout or self.DEFAULT_MSG_RECV_TIMEOUT
 			)
 
@@ -294,6 +313,7 @@ class PSPMShared(NamedPrint):
 			buf = io.BytesIO(
 				self.read_body(
 					payload_len,
+					is_pickled,
 					timeout=1337_69
 				)
 			)
