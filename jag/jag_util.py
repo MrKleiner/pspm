@@ -219,7 +219,6 @@ def skt_timeout(skt, timeout, skt_files=None, timer=None):
 
 
 
-
 class ClassDict:
 	def __init__(self, **kwargs):
 		for key, val in kwargs.items():
@@ -247,39 +246,46 @@ class NPrintData:
 
 
 class NamedPrint:
+	NPRINT_DISABLED = False
+
+	# Class name
 	@classmethod
 	def nprint(cls, *args, **kwargs):
-		print(
-			f'[{NPrintData.apply(cls.__name__)}]',
-			*args,
-			**kwargs,
-		)
+		if not cls.NPRINT_DISABLED:
+			print(
+				f'[{NPrintData.apply(cls.__name__)}]',
+				*args,
+				**kwargs,
+			)
 
-
+	# Class name + function name
 	@classmethod
 	def nprintf(cls, *args, **kwargs):
-		print(
-			'.'.join((
-				f'[{NPrintData.apply(cls.__name__)}]',
-				str(inspect.stack()[1].function),
-			)),
-			*args,
-			**kwargs,
-		)
+		if not cls.NPRINT_DISABLED:
+			print(
+				'.'.join((
+					f'[{NPrintData.apply(cls.__name__)}]',
+					str(inspect.stack()[1].function),
+				)),
+				*args,
+				**kwargs,
+			)
 
+	# Class name, clamped line width
 	@classmethod
 	def nprintc(cls, *args, **kwargs):
-		lines = ' '.join(map(str, args)).split('\n')
-		if not lines:
-			cls.nprint()
-			return
+		if not cls.NPRINT_DISABLED:
+			lines = ' '.join(map(str, args)).split('\n')
+			if not lines:
+				cls.nprint()
+				return
 
-		cls.nprint(lines[0][0:100])
+			cls.nprint(lines[0][0:100])
 
-		del lines[0]
+			del lines[0]
 
-		for line in lines:
-			print(line[0:100])
+			for line in lines:
+				print(line[0:100])
 
 
 
@@ -375,5 +381,37 @@ class FasterTimerSched:
 					import traceback
 					traceback.print_exc()
 
+
+
+class TDict:
+	# Thread-safER dictionaries
+
+	def __init__(self):
+		self.real_dict = {}
+		self.th_lock = threading.Lock()
+
+	@contextlib.contextmanager
+	def edit(self):
+		with self.th_lock:
+			yield self.real_dict
+
+	def __getitem__(self, key):
+		with self.th_lock:
+			return self.real_dict.get(key)
+
+	def __setitem__(self, key, val):
+		with self.th_lock:
+			self.real_dict[key] = val
+
+	def __delitem__(self, key):
+		with self.th_lock:
+			if key in self.real_dict:
+				del self.real_dict[key]
+
+	def __contains__(self, key):
+		with self.th_lock:
+			return (
+				key in self.real_dict
+			)
 
 

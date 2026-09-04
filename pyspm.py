@@ -3,14 +3,10 @@ import pickle
 import os
 import io
 import contextlib
+import hashlib
 
-
-try:
-	from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-	import cryptography.exceptions as crypto_exceptions
-except ImportError as e:
-	ChaCha20Poly1305 = None
-	raise e
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+import cryptography.exceptions as crypto_exceptions
 
 
 from .jag.jag_util import (
@@ -60,6 +56,7 @@ class FuckedUnpicklerButtplug(NamedPrint):
 
 class FuckedUnpickler(pickle.Unpickler, NamedPrint):
 	PRINT_WARNINGS = False
+
 	def find_class(self, module, name):
 		try:
 			return super().find_class(module, name)
@@ -67,6 +64,33 @@ class FuckedUnpickler(pickle.Unpickler, NamedPrint):
 			if self.PRINT_WARNINGS:
 				self.nprint('WARNING: MISSING SHIT:', module, name)
 			return FuckedUnpicklerButtplug
+
+
+class BootlegChallenge:
+	DEFAULT_DIFFICULTY = 4
+
+	@staticmethod
+	def create():
+		return secrets.token_hex(32)
+
+	def solve(challenge):
+		solution = 0
+
+		target = '0' * self.DEFAULT_DIFFICULTY
+
+		while True:
+			data = f'{challenge}{solution}'.encode()
+			digest = hashlib.sha256(data).hexdigest()
+
+			if digest.startswith(target):
+				return solution
+
+			solution += 1
+
+	def verify(challenge, solution):
+		data = f'{challenge}{solution}'.encode()
+		digest = hashlib.sha256(data).hexdigest()
+		return digest.startswith('0' * self.DEFAULT_DIFFICULTY)
 
 
 
@@ -78,6 +102,8 @@ class FuckedUnpickler(pickle.Unpickler, NamedPrint):
 # ==============================
 
 class PSPMShared(NamedPrint):
+	NPRINT_DISABLED = True
+
 	# So basically, it can happen so that the unpickler tries
 	# importing a non-existing module...
 	# This makes it stfu in a fucked up way
@@ -105,13 +131,13 @@ class PSPMShared(NamedPrint):
 
 	# Thou who connects has this many seconds
 	# to send the first message before their connection is force terminated.
-	AUTH_TIMEOUT_S = 4.000
+	AUTH_TIMEOUT_S = 5.000
 
 	# Flags:
 	# 0 - = Is ping
 	# 1 0 = Is last
 	# 2 1 = Is pickled
-	# 3 2 = -
+	# 3 2 = Bootleg cipher
 	# 5 3 = -
 	# 6 4 = -
 	# 7 5 = -
@@ -332,6 +358,8 @@ class PSPMShared(NamedPrint):
 
 
 class PSPMListener(NamedPrint):
+	NPRINT_DISABLED = True
+
 	def __init__(self, listen_skt, key, alt_timer=None):
 		self.listen_skt = listen_skt
 		self.key = key
@@ -383,6 +411,8 @@ class PSPMListener(NamedPrint):
 
 
 class PSPMConnection(PSPMShared):
+	NPRINT_DISABLED = True
+
 	def __enter__(self):
 		return self
 
@@ -392,6 +422,8 @@ class PSPMConnection(PSPMShared):
 
 
 class PySecurePickleMessaging(NamedPrint):
+	NPRINT_DISABLED = True
+
 	# Use a SUPPOSEDLY more performant version of threading.Timer
 	USE_ALT_TIMER = True
 
